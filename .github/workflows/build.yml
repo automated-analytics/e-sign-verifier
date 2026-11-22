@@ -1,0 +1,56 @@
+name: Build and release
+
+# Builds verify.html from this repo's source and runs the golden-vector tests on every push. On a
+# version tag (pushed by e-sign's export job), it publishes the build and its sha256 as a release
+# of THIS repo, so the public hash comes from a public build of the public source.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release on a tag push
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: build verify.html
+        run: |
+          npm run build:verifier -- --out "$GITHUB_WORKSPACE/dist/verify.html"
+          cd "$GITHUB_WORKSPACE/dist"
+          sha256sum verify.html | tee verify.html.sha256
+      - name: check the hash against the export manifest
+        working-directory: .
+        run: |
+          want=$(python3 -c 'import json; print(json.load(open("EXPORT.json")).get("verify_html_sha256", ""))')
+          got=$(cut -d' ' -f1 dist/verify.html.sha256)
+          if [ -n "$want" ] && [ "$want" != "$got" ]; then
+            echo "::error::rebuilt verify.html sha256 $got != exported $want"
+            exit 1
+          fi
+          echo "verify.html sha256 $got"
+      - name: publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/verify.html dist/verify.html.sha256 \
+            --title "$TAG" \
+            --notes "Source export of e-sign $TAG. verify.html was built by this workflow from this tag; see the README to rebuild it and compare the sha256."

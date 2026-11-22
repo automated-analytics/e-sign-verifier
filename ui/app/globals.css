@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    @apply h-full text-slate-900 antialiased;
+  }
+  /* A soft, brand-tinted canvas: a faint azure wash at the top fading into near-white,
+     so cards lift off the page (Documenso-style calm surface, DocuSign-style trust blue). */
+  body {
+    background-color: #f8fafc;
+    background-image:
+      radial-gradient(60rem 40rem at 50% -12rem, rgba(37, 99, 235, 0.08), transparent 60%),
+      radial-gradient(48rem 32rem at 100% 0%, rgba(56, 189, 248, 0.06), transparent 55%);
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+  }
+  ::selection {
+    @apply bg-brand-600/20;
+  }
+}
+
+/* Honor the OS "reduce motion" setting everywhere: collapse durations and stop looping so the
+   spinners settle to a static ring and entrances resolve instantly, with no vestibular motion.
+   Content stays fully visible - these rules only remove movement, never hide anything. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

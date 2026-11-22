@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- No network, by construction: everything this page needs is inline, and the policy below
+         forbids every fetch, form post, frame, and external resource. -->
+    <meta http-equiv="Content-Security-Policy" content="%%CSP%%" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="Verify an e-sign evidence bundle and sealed PDF in your browser, offline." />
+    <title>Verify a signed record - e-sign</title>
+    <style>%%STYLE%%</style>
+  </head>
+  <body class="font-sans">
+    <div id="root">
+      <noscript>This verifier needs JavaScript; it runs entirely in your browser and makes no network requests.</noscript>
+    </div>
+    <script>%%SCRIPT%%</script>
+  </body>
+</html>
