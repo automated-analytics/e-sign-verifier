@@ -18,6 +18,8 @@ export type Verdict =
   | "verified" // chain + inclusion + trusted timestamp all pass
   | "development" // passes only with the dev-mode stand-in timestamp (local test bundle)
   | "not_anchored" // chain intact, but no timestamp yet: cannot be trusted yet
+  | "partial" // proven up to a timestamped event; later events unproven (ADR-0027)
+  | "receipt" // anchor checks pass, but redacted events make it unprovable (ADR-0028)
   | "failed" // something does not verify: altered or forged
   | "invalid"; // not an evidence bundle at all
 
@@ -29,12 +31,16 @@ export type PdfMatch =
   | { kind: "earlier"; sha256: string } // an intermediate seal (a later signer sealed again)
   | { kind: "unsigned_input"; sha256: string } // the document a signer signed onto
   | { kind: "mismatch"; sha256: string }
-  | { kind: "unavailable"; sha256: string }; // bundle carries no visible sealed-PDF hash
+  | { kind: "unavailable"; sha256: string } // bundle carries no visible sealed-PDF hash
+  | { kind: "unprovable"; sha256: string } // hidden events: the visible hashes prove nothing
+  | { kind: "after_anchor"; sha256: string }; // recorded only AFTER the timestamp: unproven
 
 export interface TimelineEntry {
   type: string;
   actor: string;
   occurredAt: string | null;
+  /** Recorded after the last timestamp (ADR-0027): only self-consistent, so not proven. */
+  unproven: boolean;
 }
 
 export interface Report {
@@ -99,11 +105,43 @@ export async function matchPdf(events: JsonObject[], pdf: Uint8Array): Promise<P
   return { kind: "mismatch", sha256: sha };
 }
 
+/** Chain intact and the anchor (over the head, or an earlier event) proven and timestamped - but
+ * not, by itself, trustworthy when the bundle has redacted stubs (ADR-0028: a stub can re-root a
+ * forged record onto a real anchor). */
+function anchorChecksPass(r: VerifyBundleResult): boolean {
+  return Boolean(r.chain_valid && r.inclusion_valid && r.timestamp_valid);
+}
+
 function verdictOf(prod: VerifyBundleResult, dev: VerifyBundleResult): Verdict {
   if (prod.fully_verified) return "verified";
   if (!prod.anchored) return prod.chain_valid ? "not_anchored" : "failed";
-  if (dev.fully_verified) return "development";
+  if (anchorChecksPass(prod) && prod.redacted_events > 0) return "receipt";
+  if (anchorChecksPass(prod)) return "partial";
+  if (anchorChecksPass(dev)) return "development";
   return "failed";
+}
+
+/** Match against the anchored events; a hash that only a later (unproven) event records is
+ * reported as such, never as a match. */
+async function matchProven(
+  proven: JsonObject[],
+  later: JsonObject[],
+  pdf: Uint8Array,
+): Promise<PdfMatch> {
+  const m = await matchPdf(proven, pdf);
+  if (later.length === 0 || m.kind === "match" || m.kind === "earlier") return m;
+  const after = await matchPdf([...proven, ...later], pdf);
+  if (after.kind === "match" || after.kind === "earlier" || after.kind === "unsigned_input") {
+    return { kind: "after_anchor", sha256: after.sha256 };
+  }
+  return m;
+}
+
+/** With redacted stubs in the bundle, a visible sealed-PDF hash may belong to a forged record
+ * re-rooted onto a genuine anchor (ADR-0028), so no PDF result can be vouched for. */
+function provable(m: PdfMatch, redacted: number): PdfMatch {
+  if (redacted === 0 || m.kind === "none" || m.kind === "unavailable") return m;
+  return { kind: "unprovable", sha256: m.sha256 };
 }
 
 const EMPTY = {
@@ -155,13 +193,19 @@ export async function buildReport(
   // verifyBundle accepted it, so it is an object whose events (if any) are a list of objects.
   const b = bundle as JsonObject;
   const allEvents = (b.events ?? []) as JsonObject[];
-  const events = visibleEvents(allEvents);
-  const revokedEvent = [...events].reverse().find((e) => e.type === "envelope.revoked");
   const verdict = verdictOf(prod, dev);
   const devTimestamp = prod.timestamp_valid === false && dev.timestamp_valid === true;
+  const result = devTimestamp ? dev : prod;
+  // ADR-0027: an anchor over an earlier event proves only the events up to it. Anyone can append
+  // self-consistent events after it, so status, revocation and the PDF match come from the
+  // anchored prefix; the rest is shown as unproven.
+  const cut = result.anchored_events ?? allEvents.length;
+  const events = visibleEvents(allEvents.slice(0, cut));
+  const later = visibleEvents(allEvents.slice(cut));
+  const revokedEvent = [...events].reverse().find((e) => e.type === "envelope.revoked");
   return {
     verdict,
-    result: devTimestamp ? dev : prod,
+    result,
     devTimestamp,
     trustedTime: prod.timestamp_valid ? timestampGenTime((b.anchor as JsonObject).tsa_token) : null,
     error: null,
@@ -173,11 +217,14 @@ export async function buildReport(
     redactedCount: allEvents.filter((e) => pyTruthy(e.redacted)).length,
     eventCount: allEvents.length,
     anchoredAt: isObject(b.anchor) ? str(b.anchor.anchored_at) : null,
-    timeline: events.map((e) => ({
+    timeline: [...events, ...later].map((e, i) => ({
       type: e.type as string,
       actor: str(e.actor) ?? "",
       occurredAt: str(e.occurred_at),
+      unproven: i >= events.length,
     })),
-    pdf: pdf ? await matchPdf(events, pdf) : { kind: "none" },
+    pdf: pdf
+      ? provable(await matchProven(events, later, pdf), prod.redacted_events)
+      : { kind: "none" },
   };
 }

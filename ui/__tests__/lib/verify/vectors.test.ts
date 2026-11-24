@@ -8,7 +8,14 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { b64decodePy, sha256Hex, utf8 } from "@/lib/verify/bytes";
 import { MalformedBundle, verifyBundle } from "@/lib/verify/evidence";
-import { canonicalJson, isObject, parseJson, type Json, type JsonObject } from "@/lib/verify/json";
+import {
+  canonicalJson,
+  isObject,
+  parseJson,
+  PyInt,
+  type Json,
+  type JsonObject,
+} from "@/lib/verify/json";
 import { PINNED_TSA_ROOT_PEM } from "@/lib/verify/pinnedRoot";
 import { buildReport } from "@/lib/verify/report";
 import { verifyTimestamp, type TimestampMode } from "@/lib/verify/timestamp";
@@ -31,7 +38,14 @@ const bundles = (doc.bundles as JsonObject[]).map((v) => ({
   name: v.name as string,
   mode: v.mode as TimestampMode,
   bundle: v.bundle,
-  expect: v.expect as JsonObject,
+  // The vectors are read with the Python-exact parser, so an int (a count) is a PyInt;
+  // the verifier result is a plain JS object, so compare it as a number.
+  expect: Object.fromEntries(
+    Object.entries(v.expect as JsonObject).map(([k, x]) => [
+      k,
+      x instanceof PyInt ? Number(x.digits) : x,
+    ]),
+  ) as JsonObject,
   status: v.status as string,
   pin: typeof v.pinned_root_pem === "string" ? v.pinned_root_pem : undefined,
   pdfs: (v.pdfs as JsonObject[] | undefined)?.map((p) => ({

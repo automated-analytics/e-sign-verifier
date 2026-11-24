@@ -355,6 +355,7 @@ describe("report", () => {
       type: "envelope.created",
       actor: "caller:fathers-platform",
       occurredAt: "2026-11-17T10:00:00Z",
+      unproven: false,
     });
   });
 

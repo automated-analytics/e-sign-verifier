@@ -30,6 +30,13 @@ export interface VerifyBundleResult {
   inclusion_valid: boolean | null;
   timestamp_valid: boolean | null;
   fully_verified: boolean;
+  /** ADR-0028: redacted stubs in the bundle; any of them keeps `fully_verified` false. */
+  redacted_events: number;
+  /** ADR-0027: how many events (from the start) the anchor proves, and how many follow them.
+   * Events after the anchored ones are only self-consistent - never rely on them. Null when
+   * there is no anchor, its leaf is not an event of this chain, or the chain is broken. */
+  anchored_events: number | null;
+  events_after_anchor: number | null;
   head: string;
 }
 
@@ -104,14 +111,19 @@ export async function verifyBundle(
 
   let prev = ZERO_HASH;
   let chainValid = true;
+  const linked: string[] = []; // this_hash of each event, in chain order, up to any break
+  let redactedEvents = 0;
   for (const e of events) {
     if (!isObject(e)) throw new MalformedBundle("each event must be an object");
     if (pyTruthy(e.redacted)) {
+      // A stub's this_hash cannot be recomputed, so nothing binds it to its prev_hash (ADR-0028).
+      redactedEvents += 1;
       if (req(e, "prev_hash") !== prev) {
         chainValid = false;
         break;
       }
       prev = reqString(e, "this_hash");
+      linked.push(prev);
       continue;
     }
     const expected = await computeEventHash({
@@ -126,6 +138,7 @@ export async function verifyBundle(
       break;
     }
     prev = expected;
+    linked.push(prev);
   }
   const head = prev;
   chainValid = chainValid && head === bundle.head;
@@ -133,11 +146,24 @@ export async function verifyBundle(
   const anchor = bundle.anchor ?? null;
   let inclusionValid: boolean | null = null;
   let timestampValid: boolean | null = null;
+  let anchoredEvents: number | null = null;
   if (anchor !== null) {
     try {
+      // ADR-0027: the leaf is the head when the ledger was timestamped - today's head, or an
+      // EARLIER event of this chain if events were appended since. It proves that prefix only.
+      const leaf = req(anchor, "leaf_hash");
+      if (leaf === head) anchoredEvents = linked.length;
+      else if (typeof leaf === "string" && linked.includes(leaf)) {
+        anchoredEvents = linked.indexOf(leaf) + 1;
+      }
       inclusionValid =
-        req(anchor, "leaf_hash") === head &&
-        (await verifyInclusion(head, req(anchor, "inclusion_proof"), req(anchor, "merkle_root")));
+        anchoredEvents !== null &&
+        (await verifyInclusion(
+          leaf as string,
+          req(anchor, "inclusion_proof"),
+          req(anchor, "merkle_root"),
+        ));
+      if (!inclusionValid) anchoredEvents = null;
     } catch (err) {
       if (err instanceof MalformedBundle) throw err;
       throw new MalformedBundle(String(err)); // e.g. a non-hex proof hash (Python: ValueError)
@@ -149,12 +175,25 @@ export async function verifyBundle(
       pinnedRootPem,
     );
   }
+  const fullyVerified = Boolean(
+    chainValid &&
+      anchor !== null &&
+      inclusionValid &&
+      timestampValid &&
+      redactedEvents === 0 &&
+      anchoredEvents === linked.length,
+  );
+  // On a broken chain the event list was cut at the break, so no count means anything.
+  if (!chainValid) anchoredEvents = null;
   return {
     chain_valid: chainValid,
     anchored: anchor !== null,
     inclusion_valid: inclusionValid,
     timestamp_valid: timestampValid,
-    fully_verified: Boolean(chainValid && anchor !== null && inclusionValid && timestampValid),
+    fully_verified: fullyVerified,
+    redacted_events: redactedEvents,
+    anchored_events: anchoredEvents,
+    events_after_anchor: anchoredEvents === null ? null : linked.length - anchoredEvents,
     head,
   };
 }

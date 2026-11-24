@@ -27,7 +27,10 @@ async function readFile(file: File): Promise<Loaded> {
 }
 
 export function headline(r: Report): { tone: Tone; title: string; body: string } {
-  const pdfBad = r.pdf.kind !== "none" && r.pdf.kind !== "match";
+  // "unavailable" is not a mismatch: the bundle (an older signer receipt) doesn't carry the sealed
+  // hash, so the PDF could not be checked either way.
+  const pdfUnchecked = ["unavailable", "unprovable", "after_anchor"].includes(r.pdf.kind);
+  const pdfBad = r.pdf.kind !== "none" && r.pdf.kind !== "match" && !pdfUnchecked;
   switch (r.verdict) {
     case "verified":
       if (r.status === "revoked") {
@@ -44,6 +47,13 @@ export function headline(r: Report): { tone: Tone; title: string; body: string }
           body: "The evidence verifies, but the PDF you supplied is not the one e-sign sealed for it.",
         };
       }
+      if (pdfUnchecked) {
+        return {
+          tone: "warn",
+          title: "Verified - but the PDF could not be checked",
+          body: "This audit trail is complete, unaltered and timestamped by DigiCert, but it does not show the sealed record's hash, so it cannot say whether your PDF is the sealed document.",
+        };
+      }
       return {
         tone: "good",
         title: "Verified",
@@ -57,10 +67,39 @@ export function headline(r: Report): { tone: Tone; title: string; body: string }
           body: "The evidence checks out (with a development timestamp, which is not trusted time), but the PDF you supplied is not the one sealed for it.",
         };
       }
+      if (pdfUnchecked) {
+        return {
+          tone: "warn",
+          title: "Valid test record - the PDF could not be checked",
+          body: "The evidence checks out (with a development timestamp, which is not trusted time), but it does not show the sealed record's hash, so it cannot say whether your PDF is the sealed document.",
+        };
+      }
       return {
         tone: "warn",
         title: "Valid test record - not evidence",
-        body: "Everything checks out, but the timestamp is the local stand-in a development server uses, which anyone can create. Records from a real deployment carry a DigiCert timestamp.",
+        body: `${r.result?.events_after_anchor ? `It checks out up to its last timestamp (${r.result.events_after_anchor} later event${r.result.events_after_anchor === 1 ? " is" : "s are"} unproven)` : "Everything checks out"}, but the timestamp is the local stand-in a development server uses, which anyone can create. Records from a real deployment carry a DigiCert timestamp.`,
+      };
+    case "partial": {
+      const n = r.result?.events_after_anchor ?? 0;
+      const later = `${n} later event${n === 1 ? " was" : "s were"} recorded after that timestamp`;
+      if (pdfBad) {
+        return {
+          tone: "bad",
+          title: "Proven up to its last timestamp, but this PDF is not the sealed document",
+          body: `The audit trail up to its last DigiCert timestamp checks out (${later}, which nothing proves yet), but the PDF you supplied is not the one sealed in that part of the record.`,
+        };
+      }
+      return {
+        tone: "warn",
+        title: "Verified up to its last timestamp",
+        body: `Everything up to the timestamped event is complete, unaltered and timestamped by DigiCert${r.trustedTime ? ` at ${r.trustedTime}` : ""}. ${later}. Anyone could add such entries, so they are not proven and are not used for the status or the PDF check below. The daily anchor will cover genuine ones - download the bundle again later for a fully verified copy.`,
+      };
+    }
+    case "receipt":
+      return {
+        tone: "warn",
+        title: "Receipt checks out, but cannot prove the record on its own",
+        body: `The events you can see and the DigiCert timestamp check out, but ${r.redactedCount} of ${r.eventCount} events are hidden in this receipt. A hidden entry cannot be checked, and a forged record could end in one that copies a genuine timestamped entry, so this file alone cannot prove the record is genuine. Ask the issuing organization for the full evidence bundle.`,
       };
     case "not_anchored":
       return {
@@ -118,10 +157,20 @@ function Check({ ok, title, children }: { ok: boolean | null; title: string; chi
   );
 }
 
-export function pdfCheck(pdf: PdfMatch): { ok: boolean | null; text: string } | null {
+/** How the supplied PDF compares with the record. `recordValid` false (the audit trail does not
+ * verify) means the record's hashes prove nothing, so no PDF result - match or not - is shown. */
+export function pdfCheck(
+  pdf: PdfMatch,
+  recordValid = true,
+): { ok: boolean | null; text: string } | null {
+  if (pdf.kind === "none") return null;
+  if (!recordValid) {
+    return {
+      ok: null,
+      text: "The record itself does not verify, so the document hashes it lists prove nothing about this PDF.",
+    };
+  }
   switch (pdf.kind) {
-    case "none":
-      return null;
     case "match":
       return { ok: true, text: "Its SHA-256 equals the sealed record's hash in the audit trail." };
     case "earlier":
@@ -133,6 +182,16 @@ export function pdfCheck(pdf: PdfMatch): { ok: boolean | null; text: string } | 
       return {
         ok: false,
         text: "This is a document as it was BEFORE a signer signed it, not the sealed record.",
+      };
+    case "after_anchor":
+      return {
+        ok: null,
+        text: "Its hash appears only in an entry recorded after the last timestamp, which nothing proves yet. Download the bundle again after the next daily anchor and check again.",
+      };
+    case "unprovable":
+      return {
+        ok: null,
+        text: "This receipt hides some events, so the document hashes it shows cannot be trusted on their own. Check the PDF against the full evidence bundle from the issuing organization.",
       };
     case "unavailable":
       return {
@@ -147,7 +206,7 @@ export function pdfCheck(pdf: PdfMatch): { ok: boolean | null; text: string } | 
 function Results({ report, pdfName }: { report: Report; pdfName: string }) {
   const h = headline(report);
   const r = report.result;
-  const pdf = pdfCheck(report.pdf);
+  const pdf = pdfCheck(report.pdf, report.verdict !== "failed");
   const dev = report.devTimestamp;
   return (
     <section aria-live="polite" className="mt-8 space-y-6">
@@ -156,7 +215,7 @@ function Results({ report, pdfName }: { report: Report; pdfName: string }) {
         <p className="mt-1 text-sm">{h.body}</p>
       </div>
 
-      {report.revoked && (report.verdict === "verified" || report.verdict === "development") && (
+      {report.revoked && ["verified", "partial", "development"].includes(report.verdict) && (
         <div className="rounded-xl border border-rose-300 bg-white p-4 text-sm text-rose-800">
           <p className="font-semibold">Revoked{report.revoked.occurredAt ? ` on ${report.revoked.occurredAt}` : ""}</p>
           {report.revoked.reason && <p>Reason given: {report.revoked.reason}</p>}
@@ -179,7 +238,9 @@ function Results({ report, pdfName }: { report: Report; pdfName: string }) {
           >
             {!r.anchored
               ? "Not anchored yet - the daily anchor has not covered this record."
-              : r.inclusion_valid
+              : r.inclusion_valid && r.events_after_anchor
+                ? `A Merkle inclusion proof shows the audit trail as it stood at an earlier event is part of the anchored batch. The ${r.events_after_anchor} event${r.events_after_anchor === 1 ? "" : "s"} after it ${r.events_after_anchor === 1 ? "is" : "are"} not timestamped yet.`
+                : r.inclusion_valid
                 ? "A Merkle inclusion proof shows this audit trail's head is part of the anchored batch."
                 : "The Merkle inclusion proof does not connect this audit trail's head to the anchored batch."}
           </Check>
@@ -206,9 +267,9 @@ function Results({ report, pdfName }: { report: Report; pdfName: string }) {
       {report.redactedCount > 0 && (
         <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
           This is a signer&apos;s receipt: {report.redactedCount} of {report.eventCount} events
-          belong to other parties and are shown only as hashes. Their integrity is still proven
-          by the anchor, but their contents (including whether the envelope was later revoked)
-          are not visible here.
+          belong to other parties and are shown only as hashes. Their contents (including
+          whether the envelope was later revoked) are not visible here, and a hidden entry
+          cannot be checked, so only the full evidence bundle can be fully verified.
         </p>
       )}
 
@@ -244,6 +305,9 @@ function Results({ report, pdfName }: { report: Report; pdfName: string }) {
                   <span className="font-mono text-xs">{e.occurredAt ?? ""}</span>{" "}
                   <span className="font-medium">{e.type}</span>{" "}
                   <span className="text-slate-500">{e.actor}</span>
+                  {e.unproven && (
+                    <span className="ml-1 text-amber-700">(after the last timestamp - unproven)</span>
+                  )}
                 </li>
               ))}
             </ol>

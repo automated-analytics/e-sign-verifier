@@ -36,7 +36,8 @@ it("a verified timestamp without a readable genTime omits the time", async () =>
     });
   });
   const result = { chain_valid: true, anchored: true, inclusion_valid: true, timestamp_valid: true,
-    fully_verified: true, head: "h" };
+    fully_verified: true, redacted_events: 0, anchored_events: 1, events_after_anchor: 0,
+    head: "h" };
   await act(async () => pending[0]({ ...report("verified"), result }));
   expect(
     screen.getByText(/^Signed by DigiCert's timestamp authority, checked against/),

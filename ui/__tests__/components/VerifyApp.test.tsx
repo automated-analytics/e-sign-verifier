@@ -57,6 +57,27 @@ describe("VerifyApp", () => {
     expect(screen.getAllByText("envelope.completed").length).toBeGreaterThan(0);
   });
 
+  it("does not vouch for a PDF when the record itself fails", async () => {
+    render(<VerifyApp />);
+    await upload(bundleFile("tampered_event_payload"), sealedPdf);
+    expect(await screen.findByText("Does not verify")).toBeInTheDocument();
+    expect(
+      await screen.findByText("PDF cannot be checked against the sealed record (sealed.pdf)"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^PDF matches/)).not.toBeInTheDocument();
+    expect(screen.getByText(/record itself does not verify/)).toBeInTheDocument();
+  });
+
+  it("an old redacted receipt says the PDF can't be checked, not that it is wrong", async () => {
+    render(<VerifyApp />);
+    await upload(bundleFile("redacted_valid"), sealedPdf);
+    expect(
+      await screen.findByText("PDF cannot be checked against the sealed record (sealed.pdf)"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent(/not its sealed document/);
+    expect(screen.getByRole("status")).toHaveTextContent(/PDF could not be checked/);
+  });
+
   it("flags a PDF that is not the sealed record", async () => {
     render(<VerifyApp />);
     await upload(bundleFile("valid_full"), otherPdf);
@@ -147,6 +168,91 @@ describe("VerifyApp", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a record timestamped up to an earlier event as verified up to that point", async () => {
+    const v = vec("anchor_covers_earlier_event_prod_test_ca");
+    render(<VerifyApp pinnedRootPem={v.pinned_root_pem as string} />);
+    await upload(bundleFile("anchor_covers_earlier_event_prod_test_ca"), sealedPdf);
+    expect(await screen.findByText("Verified up to its last timestamp")).toBeInTheDocument();
+    expect(screen.getByText(/2 later events were recorded after that timestamp/)).toBeInTheDocument();
+    expect(screen.getByText(/The 2 events after it are not timestamped yet/)).toBeInTheDocument();
+    // envelope.completed sits AFTER the anchored event: unproven, so it is never a match, and the
+    // status comes from the anchored part only (review B1).
+    expect(
+      await screen.findByText("PDF cannot be checked against the sealed record (sealed.pdf)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/appears only in an entry recorded after the last timestamp/))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/PDF matches/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("(after the last timestamp - unproven)")).toHaveLength(2);
+    expect(screen.queryByText(/Revoked/)).not.toBeInTheDocument();
+  });
+
+  it("names a single event after the timestamp in the singular", async () => {
+    const v = vec("anchor_covers_earlier_event_prod_test_ca");
+    const b = parseJson(canonicalJson(v.bundle)) as JsonObject;
+    const events = b.events as JsonObject[];
+    events.pop();
+    b.head = events[events.length - 1].this_hash;
+    render(<VerifyApp pinnedRootPem={v.pinned_root_pem as string} />);
+    await upload(bundleFile("anchor_covers_earlier_event_prod_test_ca", canonicalJson(b)));
+    expect(await screen.findByText(/The 1 event after it is not timestamped yet/)).toBeInTheDocument();
+  });
+
+  it("matches the PDF when the sealed hash is inside the anchored part", async () => {
+    const v = vec("anchor_covers_completion_then_webhook_prod_test_ca");
+    render(<VerifyApp pinnedRootPem={v.pinned_root_pem as string} />);
+    await upload(bundleFile("anchor_covers_completion_then_webhook_prod_test_ca"), sealedPdf);
+    expect(await screen.findByText("Verified up to its last timestamp")).toBeInTheDocument();
+    expect(await screen.findByText("PDF matches the sealed record (sealed.pdf)")).toBeInTheDocument();
+  });
+
+  it("never vouches for a forged completion appended after the anchored part", async () => {
+    const v = vec("forged_completion_after_anchor_prod_test_ca");
+    const attackerPdf = new File(
+      [new Uint8Array(b64decodePy((v.pdfs as JsonObject[])[0].b64 as string))],
+      "attacker.pdf",
+      { type: "application/pdf" },
+    );
+    render(<VerifyApp pinnedRootPem={v.pinned_root_pem as string} />);
+    await upload(bundleFile("forged_completion_after_anchor_prod_test_ca"), attackerPdf);
+    expect(await screen.findByText("Verified up to its last timestamp")).toBeInTheDocument();
+    expect(
+      await screen.findByText("PDF cannot be checked against the sealed record (attacker.pdf)"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/PDF matches/)).not.toBeInTheDocument();
+  });
+
+  it("flags the wrong PDF against a record verified up to an earlier event", async () => {
+    const v = vec("anchor_covers_completion_then_webhook_prod_test_ca");
+    render(<VerifyApp pinnedRootPem={v.pinned_root_pem as string} />);
+    await upload(bundleFile("anchor_covers_completion_then_webhook_prod_test_ca"), otherPdf);
+    expect(
+      await screen.findByText(
+        "Proven up to its last timestamp, but this PDF is not the sealed document",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("never shows a forged record re-rooted by a redacted stub as Verified (ADR-0028)", async () => {
+    const v = vec("forged_record_redacted_stub_reroots");
+    const attackerPdf = new File(
+      [new Uint8Array(b64decodePy((v.pdfs as JsonObject[])[0].b64 as string))],
+      "attacker.pdf",
+      { type: "application/pdf" },
+    );
+    render(<VerifyApp pinnedRootPem={v.pinned_root_pem as string} />);
+    await upload(bundleFile("forged_record_redacted_stub_reroots"), attackerPdf);
+    expect(
+      await screen.findByText("Receipt checks out, but cannot prove the record on its own"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Verified")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("PDF cannot be checked against the sealed record (attacker.pdf)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/the document hashes it shows cannot be trusted/)).toBeInTheDocument();
+    expect(screen.queryByText(/PDF matches/)).not.toBeInTheDocument();
+  });
+
   it("copes with missing optional metadata (dates, ledger id), which is not hashed", async () => {
     const b = parseJson(canonicalJson(vec("revoked").bundle)) as JsonObject;
     delete b.ledger_id;
@@ -188,6 +294,65 @@ describe("helpers", () => {
       /not the sealed document/,
     );
     expect(headline({ ...base, verdict: "invalid" }).body).toBe("The file could not be read.");
+  });
+
+  it("headline: a PDF the bundle cannot check is not called a mismatch", () => {
+    const unavailable = { kind: "unavailable", sha256: "x" } as const;
+    for (const verdict of ["verified", "development"] as const) {
+      const h = headline({ ...base, verdict, pdf: unavailable });
+      expect(h.title).not.toMatch(/not (the|its) sealed document/);
+      expect(h.title).toMatch(/PDF could not be checked/);
+      expect(h.tone).toBe("warn");
+    }
+  });
+
+  it("pdfCheck never passes a PDF against a record that does not verify", () => {
+    expect(pdfCheck({ kind: "match", sha256: "x" }, false)).toMatchObject({ ok: null });
+    expect(pdfCheck({ kind: "mismatch", sha256: "x" }, false)).toMatchObject({ ok: null });
+    expect(pdfCheck({ kind: "match", sha256: "x" })).toMatchObject({ ok: true });
+  });
+
+  it("headline: a dev record with later events says so", () => {
+    const dev = (n: number) =>
+      headline({
+        ...base,
+        verdict: "development",
+        result: {
+          chain_valid: true,
+          anchored: true,
+          inclusion_valid: true,
+          timestamp_valid: true,
+          fully_verified: false,
+          redacted_events: 0,
+          anchored_events: 3,
+          events_after_anchor: n,
+          head: "h",
+        },
+      }).body;
+    expect(dev(1)).toMatch(/1 later event is unproven/);
+    expect(dev(2)).toMatch(/2 later events are unproven/);
+    expect(dev(0)).toMatch(/^Everything checks out/);
+  });
+
+  it("headline: partial, with one later event and no trusted time", () => {
+    const partial = {
+      ...base,
+      verdict: "partial" as const,
+      result: {
+        chain_valid: true,
+        anchored: true,
+        inclusion_valid: true,
+        timestamp_valid: true,
+        fully_verified: false,
+        redacted_events: 0,
+        anchored_events: 3,
+        events_after_anchor: 1,
+        head: "h",
+      },
+    };
+    expect(headline(partial).body).toMatch(/1 later event was recorded/);
+    expect(headline(partial).body).toMatch(/timestamped by DigiCert\. /);
+    expect(headline({ ...partial, result: null }).body).toMatch(/0 later events were recorded/);
   });
 
   it("pdfCheck explains intermediate seals and pre-signing inputs", () => {
